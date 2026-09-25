@@ -196,6 +196,26 @@ static LARGE_INTEGER   g_freq        = { 0 };
 static std::vector<DeviceEntry> g_last_topology;
 
 /*---------------------------------------------------------*\
+| Capture mode                                               |
+\*---------------------------------------------------------*/
+enum CaptureMode { CAPTURE_NONE, CAPTURE_AFTER_ON, CAPTURE_CONTROL };
+static CaptureMode g_capture_mode       = CAPTURE_NONE;
+static int         g_capture_packets    = 0;
+static int         g_capture_max        = 10;
+static HANDLE      g_target_hdevice     = NULL;
+static bool        g_target_identified  = false;
+
+static const char* CaptureModeName(CaptureMode m)
+{
+    switch (m)
+    {
+    case CAPTURE_AFTER_ON:   return "AFTER_ON";
+    case CAPTURE_CONTROL:    return "CONTROL";
+    default:                 return "NONE";
+    }
+}
+
+/*---------------------------------------------------------*\
 | Window procedure                                           |
 \*---------------------------------------------------------*/
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -306,7 +326,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 HANDLE hDevice = raw->header.hDevice;
                 USHORT flags   = raw->data.mouse.usFlags;
-                ULONG  buttons = raw->data.mouse.ulButtons;
+                USHORT btn_flags = raw->data.mouse.usButtonFlags;
+                USHORT btn_data  = raw->data.mouse.usButtonData;
+                ULONG  raw_btn   = raw->data.mouse.ulRawButtons;
+                LONG   last_x    = raw->data.mouse.lLastX;
+                LONG   last_y    = raw->data.mouse.lLastY;
+                ULONG  extra     = raw->data.mouse.ulExtraInformation;
+
+                /* Identify the target device from the first mouse packet */
+                if (!g_target_identified)
+                {
+                    g_target_hdevice = hDevice;
+                    g_target_identified = true;
+                }
 
                 LARGE_INTEGER now;
                 QueryPerformanceCounter(&now);
@@ -316,11 +348,49 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     gap_ms = ((double)(now.QuadPart - g_last_mouse.QuadPart) * 1000.0) / g_freq.QuadPart;
                 g_last_mouse = now;
 
+                /* Log first packet after idle */
                 if (!g_mouse_on)
                 {
                     g_mouse_on = true;
-                    LogEvent("WM_INPUT MOUSE FIRST PACKET (gap=%.0f ms) hDevice=0x%p buttons=0x%04lX flags=0x%04X",
-                             gap_ms, hDevice, buttons, flags);
+                    LogEvent("WM_INPUT MOUSE FIRST PACKET (gap=%.0f ms) hDevice=0x%p flags=0x%04X btn=0x%04X",
+                             gap_ms, hDevice, flags, btn_flags);
+                }
+
+                /* ── Capture mode: log detailed packets ── */
+                if (g_capture_mode != CAPTURE_NONE && g_capture_packets < g_capture_max)
+                {
+                    /* Only count packets from the target DeathAdder device */
+                    if (hDevice == g_target_hdevice)
+                    {
+                        g_capture_packets++;
+
+                        const char* tag = (g_capture_mode == CAPTURE_AFTER_ON) ? "ON" : "CONTROL";
+                        const char* first = "";
+
+                        if (g_capture_packets == 1)
+                            first = (g_capture_mode == CAPTURE_AFTER_ON)
+                                ? " >>> FIRST RAW INPUT AFTER PHYSICAL ON <<<"
+                                : " >>> FIRST RAW INPUT AFTER CONTROL PAUSE <<<";
+
+                        LogEvent("RAW[%s #%d] hDevice=0x%p dwType=%d"
+                                 " usFlags=0x%04X usButtonFlags=0x%04X"
+                                 " usButtonData=0x%04X ulRawButtons=0x%08lX"
+                                 " lLastX=%ld lLastY=%ld"
+                                 " ulExtraInformation=0x%08lX gap=%.0f ms%s",
+                                 tag, g_capture_packets,
+                                 hDevice, raw->header.dwType,
+                                 flags, btn_flags,
+                                 btn_data, raw_btn,
+                                 last_x, last_y,
+                                 extra, gap_ms, first);
+
+                        if (g_capture_packets >= g_capture_max)
+                        {
+                            LogEvent("=== CAPTURE_%s complete ===",
+                                     CaptureModeName(g_capture_mode));
+                            g_capture_mode = CAPTURE_NONE;
+                        }
+                    }
                 }
             }
         }
@@ -343,10 +413,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             LogEvent("=== USER MARKER: MOUSE ON (F9) ===");
             auto topo = SnapshotTopology();
             LogTopology(topo, "at ON marker");
+
+            if (g_target_identified)
+            {
+                g_capture_mode = CAPTURE_AFTER_ON;
+                g_capture_packets = 0;
+                LogEvent("=== CAPTURE_AFTER_ON armed: waiting for %d mouse packets ===",
+                         g_capture_max);
+            }
+            else
+            {
+                LogEvent("WARNING: no target device identified yet — cannot capture");
+            }
         }
-        else if (id == 3) /* F10 = generic test marker */
+        else if (id == 3) /* F10 = control capture */
         {
-            LogEvent("=== USER MARKER: TEST MARKER (F10) ===");
+            LogEvent("=== USER MARKER: CONTROL (F10) ===");
+
+            if (g_target_identified)
+            {
+                g_capture_mode = CAPTURE_CONTROL;
+                g_capture_packets = 0;
+                LogEvent("=== CAPTURE_CONTROL armed: waiting for %d mouse packets ===",
+                         g_capture_max);
+            }
+            else
+            {
+                LogEvent("WARNING: no target device identified yet — cannot capture");
+            }
         }
         return 0;
     }
@@ -374,8 +468,8 @@ int main()
     LogEvent("=== WakeEventMonitor started ===");
     LogEvent("Instructions:");
     LogEvent("  F8  = mark mouse OFF (press before turning mouse off)");
-    LogEvent("  F9  = mark mouse ON  (press after turning mouse on)");
-    LogEvent("  F10 = test marker");
+    LogEvent("  F9  = mark mouse ON, then capture 10 Raw Input packets");
+    LogEvent("  F10 = control: capture 10 Raw Input packets after pause");
     LogEvent("  Close window to quit");
     LogEvent("");
 
