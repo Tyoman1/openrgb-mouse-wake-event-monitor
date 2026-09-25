@@ -26,7 +26,6 @@
 #include <windows.h>
 #include <dbt.h>
 #include <hidusage.h>
-#include <hidclass.h>
 #include <setupapi.h>
 #include <hidsdi.h>
 #include <cfgmgr32.h>
@@ -407,7 +406,9 @@ int main()
     DEV_BROADCAST_DEVICEINTERFACE_W filter = {};
     filter.dbcc_size       = sizeof(filter);
     filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
-    filter.dbcc_classguid  = GUID_DEVINTERFACE_HID;
+    filter.dbcc_classguid  = { 0x4d1e55b2, 0xf16f, 0x11cf,
+                                  { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
+    /* This is GUID_DEVINTERFACE_HID — using raw value to avoid linker dependency */
 
     HDEVNOTIFY notify_hid = RegisterDeviceNotificationW(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
