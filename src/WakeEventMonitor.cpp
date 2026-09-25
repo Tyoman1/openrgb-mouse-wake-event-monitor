@@ -280,7 +280,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                         : "UNKNOWN";
 
         /* Get device info */
-        RID_DEVICE_INFO info = { .cbSize = sizeof(RID_DEVICE_INFO) };
+        RID_DEVICE_INFO info = {};
+        info.cbSize = sizeof(RID_DEVICE_INFO);
         UINT infoSize = sizeof(info);
         wchar_t devName[256] = {0};
         UINT nameSize = 256;
