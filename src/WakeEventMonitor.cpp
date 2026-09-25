@@ -2,7 +2,7 @@
 | WakeEventMonitor.exe                                       |
 |                                                            |
 |  Diagnostic utility for detecting physical wireless mouse  |
-|  OFF тЖТ ON events.                                          |
+|  OFF → ON events without periodic HID polling.             |
 |                                                            |
 |  Monitors:                                                 |
 |    - WM_DEVICECHANGE (USB/HID topology changes)            |
@@ -12,19 +12,16 @@
 |    - First-movement-after-gap detection                    |
 |                                                            |
 |  Usage:                                                    |
-|    1. Run as administrator (for WM_DEVICECHANGE)           |
-|    2. Press F8 just before turning mouse OFF              |
-|    3. Press F9 just after turning mouse ON               |
-|    4. Review the log to see what events fired             |
+|    F8  — mark mouse OFF                                    |
+|    F9  — mark mouse ON                                     |
+|    F10 — test marker                                       |
 |                                                            |
 |  No periodic HID polling.  Event-driven only.              |
 \*---------------------------------------------------------*/
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-#define _WIN32_WINNT 0x0601  /* Windows 7+ API levels */
-#define NTDDI_VERSION 0x06010000
-#define _CRT_SECURE_NO_WARNINGS
+#define _WIN32_WINNT 0x0601
 
 #include <windows.h>
 #include <dbt.h>
@@ -53,10 +50,10 @@ static void OpenLog()
     fopen_s(&g_log, "WakeEventMonitor.log", "w");
     if (g_log)
     {
-        fprintf(g_log, "WakeEventMonitor diagnostic log\n");
-        fprintf(g_log, "================================\n");
-        fprintf(g_log, "Timestamp        Event\n");
-        fprintf(g_log, "================================\n");
+        fputs("WakeEventMonitor diagnostic log\n", g_log);
+        fputs("================================\n", g_log);
+        fputs("Timestamp        Event\n", g_log);
+        fputs("================================\n", g_log);
         fflush(g_log);
     }
 }
@@ -80,25 +77,25 @@ static void LogEvent(const char* fmt, ...)
 
     if (g_log)
     {
-        fprintf(g_log, "%s", prefix);
+        fputs(prefix, g_log);
         va_start(args, fmt);
         vfprintf(g_log, fmt, args);
         va_end(args);
-        fprintf(g_log, "\n");
+        fputc('\n', g_log);
         fflush(g_log);
     }
 }
 
 /*---------------------------------------------------------*\
-| Device topology snapshot                                   |
+| Device topology snapshot (Unicode API)                    |
 \*---------------------------------------------------------*/
 struct DeviceEntry
 {
-    std::string path;
-    WORD        vid;
-    WORD        pid;
-    int         iface;
-    std::string instance_id;
+    std::wstring path;
+    WORD         vid;
+    WORD         pid;
+    int          iface;
+    std::wstring instance_id;
 };
 
 static std::vector<DeviceEntry> SnapshotTopology()
@@ -125,29 +122,27 @@ static std::vector<DeviceEntry> SnapshotTopology()
         std::vector<BYTE> buf(req);
         auto* detail = (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)buf.data();
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-        if (!SetupDiGetDeviceInterfaceDetailW(dev_info, &di, detail, (DWORD)buf.size(), &req, NULL))
+        if (!SetupDiGetDeviceInterfaceDetailW(dev_info, &di, detail,
+                                               (DWORD)buf.size(), &req, NULL))
             continue;
 
         std::wstring path = detail->DevicePath;
 
-        /* Parse VID, PID, MI */
+        /* Parse VID, PID, MI from wide path */
         WORD vid = 0, pid = 0;
         int mi = -1;
-        const wchar_t* s = path.c_str();
-        const wchar_t* p;
 
-        p = wcsstr(s, L"vid_");
-        if (p) { wchar_t v[16]={0}; wcsncpy_s(v, p+4, 4); vid = (WORD)wcstol(v,NULL,16); }
-        p = wcsstr(s, L"pid_");
-        if (p) { wchar_t v[16]={0}; wcsncpy_s(v, p+4, 4); pid = (WORD)wcstol(v,NULL,16); }
-        p = wcsstr(s, L"mi_");
-        if (p) { wchar_t v[16]={0}; wcsncpy_s(v, p+3, 2); mi = (int)wcstol(v,NULL,16); }
+        const wchar_t* vid_pos = wcsstr(path.c_str(), L"vid_");
+        if (vid_pos) { wchar_t v[16]={0}; wcsncpy_s(v, vid_pos+4, 4); vid = (WORD)wcstol(v,NULL,16); }
 
-        char path_a[512] = {0};
-        WideCharToMultiByte(CP_ACP, 0, path.c_str(), -1, path_a, (int)sizeof(path_a)-1, NULL, NULL);
+        const wchar_t* pid_pos = wcsstr(path.c_str(), L"pid_");
+        if (pid_pos) { wchar_t v[16]={0}; wcsncpy_s(v, pid_pos+4, 4); pid = (WORD)wcstol(v,NULL,16); }
+
+        const wchar_t* mi_pos = wcsstr(path.c_str(), L"mi_");
+        if (mi_pos) { wchar_t v[16]={0}; wcsncpy_s(v, mi_pos+3, 2); mi = (int)wcstol(v,NULL,16); }
 
         DeviceEntry e;
-        e.path = path_a;
+        e.path = path;
         e.vid = vid;
         e.pid = pid;
         e.iface = mi;
@@ -157,12 +152,9 @@ static std::vector<DeviceEntry> SnapshotTopology()
         if (SetupDiEnumDeviceInfo(dev_info, idx, &did))
         {
             WCHAR iid[256] = {0};
-            if (CM_Get_Device_IDW(did.DevInst, iid, (ULONG)(sizeof(iid)/sizeof(WCHAR)), 0) == CR_SUCCESS)
-            {
-                char a[256]={0};
-                WideCharToMultiByte(CP_ACP, 0, iid, -1, a, (int)sizeof(a)-1, NULL, NULL);
-                e.instance_id = a;
-            }
+            if (CM_Get_Device_IDW(did.DevInst, iid,
+                                  (ULONG)(sizeof(iid)/sizeof(WCHAR)), 0) == CR_SUCCESS)
+                e.instance_id = iid;
         }
 
         result.push_back(e);
@@ -179,7 +171,6 @@ static void LogTopology(const std::vector<DeviceEntry>& devices, const char* lab
     {
         const auto& d = devices[i];
 
-        /* Only log Razer DeathAdder or interesting entries */
         if (d.vid == 0x1532 && (d.pid == 0x007C || d.pid == 0x007D))
         {
             char pid_str[16];
@@ -198,14 +189,11 @@ static void LogTopology(const std::vector<DeviceEntry>& devices, const char* lab
 \*---------------------------------------------------------*/
 static HWND            g_hwnd        = NULL;
 static bool            g_running     = true;
-static bool            g_mouse_on    = false;  /* true = receiving input */
+static bool            g_mouse_on    = false;
 static LARGE_INTEGER   g_last_mouse  = { 0 };
 static LARGE_INTEGER   g_freq        = { 0 };
 
 static std::vector<DeviceEntry> g_last_topology;
-
-/* User markers */
-static int  g_marker_id = 0;
 
 /*---------------------------------------------------------*\
 | Window procedure                                           |
@@ -227,11 +215,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         PostQuitMessage(0);
         return 0;
 
-    /* тФАтФА WM_DEVICECHANGE тФАтФА */
+    /* ── WM_DEVICECHANGE (explicit W-struct) ── */
     case WM_DEVICECHANGE:
     {
         DWORD evt = (DWORD)wParam;
-        DEV_BROADCAST_HDR* hdr = (DEV_BROADCAST_HDR*)lParam;
+        auto* hdr = (DEV_BROADCAST_HDR*)lParam;
 
         const char* evt_name = "UNKNOWN";
         switch (evt)
@@ -248,17 +236,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (hdr && hdr->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
         {
-            DEV_BROADCAST_DEVICEINTERFACE* di = (DEV_BROADCAST_DEVICEINTERFACE*)hdr;
-            char name[256] = {0};
-            WideCharToMultiByte(CP_ACP, 0, (LPCWCH)di->dbcc_name, -1, name, (int)sizeof(name)-1, NULL, NULL);
+            /* Use explicit W-struct — never cast dbcc_name from char[] */
+            auto* di = (DEV_BROADCAST_DEVICEINTERFACE_W*)hdr;
 
-            LogEvent("WM_DEVICECHANGE %s: %s", evt_name, name);
+            LogEvent("WM_DEVICECHANGE %s: %ws", evt_name, di->dbcc_name);
 
-            /* Check if any DeathAdder path appears/disappears */
-            if (strstr(name, "vid_1532") || strstr(name, "pid_007C") || strstr(name, "pid_007D"))
+            if (wcsstr(di->dbcc_name, L"vid_1532") ||
+                wcsstr(di->dbcc_name, L"pid_007C") ||
+                wcsstr(di->dbcc_name, L"pid_007D"))
                 LogEvent("  >>> RAZER DEVICE AFFECTED <<<");
 
-            /* Snapshot topology after change */
             auto topo = SnapshotTopology();
             LogTopology(topo, "after DEVICECHANGE");
         }
@@ -269,7 +256,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
-    /* тФАтФА WM_INPUT_DEVICE_CHANGE тФАтФА */
+    /* ── WM_INPUT_DEVICE_CHANGE ── */
     case WM_INPUT_DEVICE_CHANGE:
     {
         HANDLE hDevice = (HANDLE)lParam;
@@ -279,50 +266,47 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                         : (flags == GIDC_REMOVAL) ? "GIDC_REMOVAL"
                         : "UNKNOWN";
 
-        /* Get device info */
         RID_DEVICE_INFO info = {};
         info.cbSize = sizeof(RID_DEVICE_INFO);
         UINT infoSize = sizeof(info);
+
         wchar_t devName[256] = {0};
         UINT nameSize = 256;
 
         GetRawInputDeviceInfoW(hDevice, RIDI_DEVICENAME, devName, &nameSize);
         GetRawInputDeviceInfoW(hDevice, RIDI_DEVICEINFO, &info, &infoSize);
 
-        char name_a[256] = {0};
-        WideCharToMultiByte(CP_ACP, 0, devName, -1, name_a, (int)sizeof(name_a)-1, NULL, NULL);
-
-        LogEvent("WM_INPUT_DEVICE_CHANGE %s hDevice=0x%p type=%d/%s name=%s",
+        LogEvent("WM_INPUT_DEVICE_CHANGE %s hDevice=0x%p type=%d/%s name=%ws",
                  type, hDevice, info.dwType,
                  (info.dwType == RIM_TYPEMOUSE) ? "MOUSE" :
                  (info.dwType == RIM_TYPEKEYBOARD) ? "KBD" :
                  (info.dwType == RIM_TYPEHID) ? "HID" : "?",
-                 name_a);
+                 devName);
 
         LogEvent("  >>> RAWINPUT DEVICE %s <<<", type);
 
-        /* Snapshot topology after RawInput device change */
         auto topo = SnapshotTopology();
         LogTopology(topo, "after RAWINPUT change");
         return 0;
     }
 
-    /* тФАтФА WM_INPUT (Raw Input mouse packets) тФАтФА */
+    /* ── WM_INPUT (Raw Input mouse packets) ── */
     case WM_INPUT:
     {
         UINT dwSize = 0;
         GetRawInputData((HRAWINPUT)lParam, RID_INPUT, NULL, &dwSize, sizeof(RAWINPUTHEADER));
 
         std::vector<BYTE> buffer(dwSize);
-        if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, buffer.data(), &dwSize, sizeof(RAWINPUTHEADER)) == dwSize)
+        if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, buffer.data(),
+                            &dwSize, sizeof(RAWINPUTHEADER)) == dwSize)
         {
-            RAWINPUT* raw = (RAWINPUT*)buffer.data();
+            auto* raw = (RAWINPUT*)buffer.data();
 
             if (raw->header.dwType == RIM_TYPEMOUSE)
             {
                 HANDLE hDevice = raw->header.hDevice;
-                USHORT flags = raw->data.mouse.usFlags;
-                ULONG buttons = raw->data.mouse.ulButtons;
+                USHORT flags   = raw->data.mouse.usFlags;
+                ULONG  buttons = raw->data.mouse.ulButtons;
 
                 LARGE_INTEGER now;
                 QueryPerformanceCounter(&now);
@@ -338,47 +322,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     LogEvent("WM_INPUT MOUSE FIRST PACKET (gap=%.0f ms) hDevice=0x%p buttons=0x%04lX flags=0x%04X",
                              gap_ms, hDevice, buttons, flags);
                 }
-
-                /* Log every 1000th packet or notable events */
-                static DWORD pkt_count = 0;
-                pkt_count++;
-                if ((pkt_count % 1000) == 0 || flags & 0x0001 /* MOUSE_MOVE_RELATIVE */)
-                {
-                    /* Quiet тАФ only log notable events or first after gap */
-                }
             }
         }
         return 0;
     }
 
-    /* тФАтФА Hotkeys for user markers тФАтФА */
+    /* ── Hotkeys ── */
     case WM_HOTKEY:
     {
         int id = (int)wParam;
-        if (id == 1) /* F8 */
+        if (id == 1) /* F8 = mouse OFF */
         {
-            LogEvent("=== USER MARKER: Turning mouse OFF (F8) ===");
+            LogEvent("=== USER MARKER: MOUSE OFF (F8) ===");
             g_mouse_on = false;
-
             auto topo = SnapshotTopology();
             LogTopology(topo, "at OFF marker");
         }
-        else if (id == 2) /* F9 */
+        else if (id == 2) /* F9 = mouse ON */
         {
-            LogEvent("=== USER MARKER: Turning mouse ON (F9) ===");
-
+            LogEvent("=== USER MARKER: MOUSE ON (F9) ===");
             auto topo = SnapshotTopology();
             LogTopology(topo, "at ON marker");
+        }
+        else if (id == 3) /* F10 = generic test marker */
+        {
+            LogEvent("=== USER MARKER: TEST MARKER (F10) ===");
         }
         return 0;
     }
 
-    /* тФАтФА System command for Windows messages тФАтФА */
     case WM_POWERBROADCAST:
-    {
         LogEvent("WM_POWERBROADCAST wParam=0x%08lX", wParam);
         return 0;
-    }
 
     default:
         break;
@@ -398,25 +373,25 @@ int main()
 
     LogEvent("=== WakeEventMonitor started ===");
     LogEvent("Instructions:");
-    LogEvent("  F8 = mark mouse OFF (press before turning mouse off)");
-    LogEvent("  F9 = mark mouse ON (press after turning mouse on)");
+    LogEvent("  F8  = mark mouse OFF (press before turning mouse off)");
+    LogEvent("  F9  = mark mouse ON  (press after turning mouse on)");
+    LogEvent("  F10 = test marker");
     LogEvent("  Close window to quit");
     LogEvent("");
 
-    /* Initial topology snapshot */
     g_last_topology = SnapshotTopology();
     LogTopology(g_last_topology, "initial");
 
     /* Register window class */
-    WNDCLASS wc = {};
+    WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
-    wc.hInstance = GetModuleHandle(NULL);
-    wc.lpszClassName = "WakeEventMonitorClass";
-    RegisterClass(&wc);
+    wc.hInstance   = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"WakeEventMonitorClass";
+    RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, "WakeEventMonitor",
-                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                600, 400, NULL, NULL, wc.hInstance, NULL);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"WakeEventMonitor",
+                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                 600, 400, NULL, NULL, wc.hInstance, NULL);
 
     if (!hwnd)
     {
@@ -427,25 +402,29 @@ int main()
     ShowWindow(hwnd, SW_SHOW);
     g_hwnd = hwnd;
 
-    /* тФАтФА Register for WM_DEVICECHANGE тФАтФА */
-    DEV_BROADCAST_DEVICEINTERFACE filter = {};
-    filter.dbcc_size = sizeof(filter);
+    /* ── Register for WM_DEVICECHANGE ── */
+    DEV_BROADCAST_DEVICEINTERFACE_W filter = {};
+    filter.dbcc_size       = sizeof(filter);
     filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
-    filter.dbcc_classguid = { 0x4d1e55b2, 0xf16f, 0x11cf, { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
-    HDEVNOTIFY notify_dev = RegisterDeviceNotification(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+    filter.dbcc_classguid  = GUID_DEVINTERFACE_HID;
 
-    /* Also register for HID class */
-    GUID hid_guid;
-    HidD_GetHidGuid(&hid_guid);
-    filter.dbcc_classguid = hid_guid;
-    HDEVNOTIFY notify_hid = RegisterDeviceNotification(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+    HDEVNOTIFY notify_hid = RegisterDeviceNotificationW(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
-    if (notify_dev || notify_hid)
+    /* Also register for generic USB device interface */
+    DEV_BROADCAST_DEVICEINTERFACE_W usb_filter = {};
+    usb_filter.dbcc_size       = sizeof(usb_filter);
+    usb_filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    usb_filter.dbcc_classguid  = { 0x4d1e55b2, 0xf16f, 0x11cf,
+                                   { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
+
+    HDEVNOTIFY notify_usb = RegisterDeviceNotificationW(hwnd, &usb_filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+
+    if (notify_hid || notify_usb)
         LogEvent("Registered for WM_DEVICECHANGE (USB+HID)");
     else
         LogEvent("WARNING: RegisterDeviceNotification failed (0x%lx)", GetLastError());
 
-    /* тФАтФА Register for Raw Input (mouse) тФАтФА */
+    /* ── Register for Raw Input (mouse only) ── */
     RAWINPUTDEVICE rid = {};
     rid.usUsagePage = HID_USAGE_PAGE_GENERIC;
     rid.usUsage     = HID_USAGE_GENERIC_MOUSE;
@@ -457,25 +436,25 @@ int main()
     else
         LogEvent("WARNING: RegisterRawInputDevices failed (0x%lx)", GetLastError());
 
-    /* тФАтФА Hotkeys тФАтФА */
-    RegisterHotKey(hwnd, 1, 0, VK_F8);  /* F8 = OFF marker */
-    RegisterHotKey(hwnd, 2, 0, VK_F9);  /* F9 = ON marker */
+    /* ── Hotkeys ── */
+    RegisterHotKey(hwnd, 1, 0, VK_F8);
+    RegisterHotKey(hwnd, 2, 0, VK_F9);
+    RegisterHotKey(hwnd, 3, 0, VK_F10);
 
     LogEvent("");
     LogEvent("Ready. Waiting for events...");
     LogEvent("");
 
-    /* тФАтФА Message loop тФАтФА */
+    /* ── Message loop ── */
     MSG msg;
-    while (g_running && GetMessage(&msg, NULL, 0, 0))
+    while (g_running && GetMessageW(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
-    /* Cleanup */
-    if (notify_dev) UnregisterDeviceNotification(notify_dev);
     if (notify_hid) UnregisterDeviceNotification(notify_hid);
+    if (notify_usb) UnregisterDeviceNotification(notify_usb);
 
     LogEvent("=== WakeEventMonitor stopped ===");
 
