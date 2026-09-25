@@ -12,8 +12,8 @@ jobs:
   build:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      # v4.2.2 — https://github.com/actions/checkout/releases/tag/v4.2.2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # v4.4.0 — https://github.com/actions/checkout/releases/tag/v4.4.0
 
       - name: Configure
         shell: pwsh
@@ -44,7 +44,7 @@ jobs:
           Write-Host "SHA256: $($hash.Hash)"
 
       - name: Upload
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd6aab2f46ad38c29db
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         # v4.6.2 — https://github.com/actions/upload-artifact/releases/tag/v4.6.2
         with:
           name: WakeEventMonitor
