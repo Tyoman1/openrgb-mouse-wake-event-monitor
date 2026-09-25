@@ -26,6 +26,7 @@
 #include <windows.h>
 #include <dbt.h>
 #include <hidusage.h>
+#include <hidclass.h>
 #include <setupapi.h>
 #include <hidsdi.h>
 #include <cfgmgr32.h>
