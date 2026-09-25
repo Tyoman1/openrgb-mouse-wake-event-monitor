@@ -250,7 +250,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             DEV_BROADCAST_DEVICEINTERFACE* di = (DEV_BROADCAST_DEVICEINTERFACE*)hdr;
             char name[256] = {0};
-            WideCharToMultiByte(CP_ACP, 0, di->dbcc_name, -1, name, (int)sizeof(name)-1, NULL, NULL);
+            WideCharToMultiByte(CP_ACP, 0, (LPCWCH)di->dbcc_name, -1, name, (int)sizeof(name)-1, NULL, NULL);
 
             LogEvent("WM_DEVICECHANGE %s: %s", evt_name, name);
 
